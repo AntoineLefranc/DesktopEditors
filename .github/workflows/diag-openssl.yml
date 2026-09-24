@@ -1,0 +1,48 @@
+name: Diag OpenSSL (Windows)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [strawberry-D, strawberry-short-C, strawberry-autocrlf-default]
+    steps:
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Tool versions
+        shell: pwsh
+        run: |
+          perl -v | Select-Object -First 3
+          (Get-Command perl).Source
+          nmake /? 2>&1 | Select-Object -First 2
+
+      - name: Clone + Configure + build libapps
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          switch ('${{ matrix.variant }}') {
+            'strawberry-short-C'          { $dir = 'C:\o' }
+            default                       { $dir = Join-Path $env:GITHUB_WORKSPACE 'third_party\work\openssl' }
+          }
+          if ('${{ matrix.variant }}' -eq 'strawberry-autocrlf-default') {
+            git clone --depth 1 --branch openssl-4.0.1 https://github.com/openssl/openssl.git $dir
+          } else {
+            git -c core.autocrlf=false -c core.eol=lf clone --depth 1 --branch openssl-4.0.1 https://github.com/openssl/openssl.git $dir
+          }
+          Set-Location $dir
+          Write-Host "== git config core.autocrlf (global): $(git config --global core.autocrlf)"
+          & (Get-Command perl).Source Configure VC-WIN64A "--prefix=$dir\inst" "--openssldir=$dir\inst" enable-md2 no-shared no-asm
+          Write-Host "== configure exit: $LASTEXITCODE"
+          Write-Host "== makefile refs to apps.c:"
+          Select-String -Path makefile -Pattern 'apps\.c"' | Select-Object -First 5 | ForEach-Object { $_.Line }
+          Write-Host "== libapps objects:"
+          Select-String -Path makefile -Pattern 'libapps-lib-apps' | Select-Object -First 3 | ForEach-Object { $_.Line }
+          Write-Host "== nmake (first 60 lines):"
+          nmake 2>&1 | Select-Object -First 60
+          Write-Host "== nmake exit: $LASTEXITCODE"
