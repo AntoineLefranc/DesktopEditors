@@ -1,0 +1,134 @@
+name: Build Windows portable (amd64)
+
+# Build complet depuis les sources, sans secrets :
+#   1. build-common (Linux/Docker) : éditeurs web (sdkjs, web-apps), x2t wasm,
+#      polices, dictionnaires -> common.tar
+#   2. build-windows (windows-2022) : core C++, desktop-sdk (CEF), desktop-apps
+#      (Qt) via build\windows\build.ps1 -> ZIP portable + installeur Inno
+#
+# Sans NEXTCLOUD_USER/PASS, les dépendances tierces (V8, OpenSSL, ...) sont
+# compilées localement au lieu d'être téléchargées depuis le cache Euro-Office.
+# sccache (cache GitHub Actions) accélère les relances.
+
+on:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io/euro-office
+  PRODUCT_VERSION: 9.3.1
+  BUILD_NUMBER: portable.1
+  BUILD_ROOT: /package
+
+jobs:
+  build-common:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build desktop-common
+        uses: docker/bake-action@v5
+        with:
+          workdir: ./build
+          files: ./docker-bake.hcl
+          targets: desktop-common
+          push: false
+          set: |
+            desktop-common.tags=
+            desktop-common.output=type=tar,dest=./common.tar
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          PRODUCT_VERSION: ${{ env.PRODUCT_VERSION }}
+          BUILD_NUMBER: ${{ env.BUILD_NUMBER }}
+          BUILD_ROOT: ${{ env.BUILD_ROOT }}
+          NUGET_CACHE: local
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: common-files
+          path: ./build/common.tar
+          compression-level: 0
+          retention-days: 7
+
+  build-windows:
+    runs-on: windows-2022
+    needs: build-common
+    timeout-minutes: 360
+    env:
+      PYTHONUTF8: "1"
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: common-files
+          path: .
+
+      - name: Extract common
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .\common | Out-Null
+          tar -xf .\common.tar -C .\common
+          Remove-Item .\common.tar
+
+      - name: Install Cygwin
+        uses: cygwin/cygwin-install-action@v4
+        with:
+          install-dir: 'C:\cygwin64'
+          add-to-path: false
+          packages: >-
+            automake
+            cmake
+            make
+            git
+            python3
+            python3-devel
+
+      - name: Install aqtinstall
+        shell: pwsh
+        run: python -m pip install --upgrade --break-system-packages aqtinstall
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Install Ninja
+        shell: pwsh
+        run: choco install ninja -y --no-progress
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+
+      - name: Build & package
+        shell: pwsh
+        run: |
+          .\build\windows\build.ps1 `
+            -CommonDir      "${{ github.workspace }}\common" `
+            -ProductVersion "${{ env.PRODUCT_VERSION }}" `
+            -Arch           x64 `
+            -Target         standalone `
+            -CompanyName    Euro-Office `
+            -ProductName    DesktopEditors
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: euro-office-windows-x64
+          path: |
+            desktop-apps/package/zip/*.zip
+            desktop-apps/package/inno/*.exe
+          compression-level: 0
+          retention-days: 30
