@@ -1,0 +1,29 @@
+name: VC++ runtime (app-local)
+
+# Copie les DLL du runtime Visual C++ (Microsoft.VC143.CRT, redistribuables)
+# depuis Visual Studio 2022 pour un déploiement "app-local" à côté de
+# DesktopEditors.exe (version portable sans installer vc_redist).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  crt:
+    runs-on: windows-2022
+    steps:
+      - name: Collect Microsoft.VC143.CRT (x64)
+        shell: pwsh
+        run: |
+          $vs  = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT" -Directory |
+                 Sort-Object FullName -Descending | Select-Object -First 1
+          Write-Host "CRT: $($crt.FullName)"
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item "$($crt.FullName)\*.dll" out\
+          Get-ChildItem out | Format-Table Name, Length
+          Split-Path (Split-Path $crt.FullName) -Parent | Split-Path -Leaf | Out-File out\VERSION.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vc143-crt-x64
+          path: out/
+          retention-days: 30
