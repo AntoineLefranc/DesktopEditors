@@ -2,47 +2,99 @@ name: Diag OpenSSL (Windows)
 
 on:
   workflow_dispatch:
+    inputs:
+      common_run_id:
+        description: "Run id providing the common-files artifact"
+        required: true
+        default: "36032504384"
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   diag:
     runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        variant: [strawberry-D, strawberry-short-C, strawberry-autocrlf-default]
+    timeout-minutes: 120
+    env:
+      PYTHONUTF8: "1"
     steps:
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: actions/checkout@v4
         with:
-          arch: x64
+          submodules: recursive
 
-      - name: Tool versions
+      - uses: actions/download-artifact@v4
+        with:
+          name: common-files
+          path: .
+          run-id: ${{ inputs.common_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Extract common
         shell: pwsh
         run: |
-          perl -v | Select-Object -First 3
-          (Get-Command perl).Source
-          nmake /? 2>&1 | Select-Object -First 2
+          New-Item -ItemType Directory -Force -Path .\common | Out-Null
+          tar -xf .\common.tar -C .\common
+          Remove-Item .\common.tar
 
-      - name: Clone + Configure + build libapps
+      - name: Install Cygwin
+        uses: cygwin/cygwin-install-action@v4
+        with:
+          install-dir: 'C:\cygwin64'
+          add-to-path: false
+          packages: >-
+            automake
+            cmake
+            make
+            git
+            python3
+            python3-devel
+
+      - name: Install aqtinstall
+        shell: pwsh
+        run: python -m pip install --upgrade --break-system-packages aqtinstall
+
+      - name: Install Ninja
+        shell: pwsh
+        run: choco install ninja -y --no-progress
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+
+      - name: Build (expected to fail at OpenSSL)
+        id: build
+        continue-on-error: true
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Continue'
-          switch ('${{ matrix.variant }}') {
-            'strawberry-short-C'          { $dir = 'C:\o' }
-            default                       { $dir = Join-Path $env:GITHUB_WORKSPACE 'third_party\work\openssl' }
-          }
-          if ('${{ matrix.variant }}' -eq 'strawberry-autocrlf-default') {
-            git clone --depth 1 --branch openssl-4.0.1 https://github.com/openssl/openssl.git $dir
-          } else {
-            git -c core.autocrlf=false -c core.eol=lf clone --depth 1 --branch openssl-4.0.1 https://github.com/openssl/openssl.git $dir
-          }
-          Set-Location $dir
-          Write-Host "== git config core.autocrlf (global): $(git config --global core.autocrlf)"
-          & (Get-Command perl).Source Configure VC-WIN64A "--prefix=$dir\inst" "--openssldir=$dir\inst" enable-md2 no-shared no-asm
-          Write-Host "== configure exit: $LASTEXITCODE"
+          .\build\windows\build.ps1 `
+            -CommonDir      "${{ github.workspace }}\common" `
+            -ProductVersion 9.3.1 `
+            -Arch           x64 `
+            -Target         standalone `
+            -CompanyName    Euro-Office `
+            -ProductName    DesktopEditors
+
+      - name: Dump OpenSSL state
+        if: always()
+        shell: pwsh
+        run: |
+          $w = Get-ChildItem -Recurse -Directory -Filter openssl -Path third_party\work -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $w) { Write-Host "no openssl workdir"; Get-ChildItem third_party -Recurse -Depth 2 | Select-Object FullName; exit 0 }
+          $d = $w.FullName
+          Write-Host "== workdir: $d"
+          Get-ChildItem $d | Select-Object -First 40 Name
+          Write-Host "== apps dir:"
+          Get-ChildItem "$d\apps" | Select-Object -First 20 Name
           Write-Host "== makefile refs to apps.c:"
-          Select-String -Path makefile -Pattern 'apps\.c"' | Select-Object -First 5 | ForEach-Object { $_.Line }
-          Write-Host "== libapps objects:"
-          Select-String -Path makefile -Pattern 'libapps-lib-apps' | Select-Object -First 3 | ForEach-Object { $_.Line }
-          Write-Host "== nmake (first 60 lines):"
-          nmake 2>&1 | Select-Object -First 60
-          Write-Host "== nmake exit: $LASTEXITCODE"
+          Select-String -Path "$d\makefile" -Pattern 'apps\.c' | Select-Object -First 8 | ForEach-Object { $_.Line }
+          Write-Host "== configdata (first 60 lines of dump):"
+          Push-Location $d
+          perl configdata.pm --dump 2>&1 | Select-Object -First 60
+          Write-Host "== env (filtered):"
+          Get-ChildItem env: | Where-Object { $_.Name -match 'MAKE|PERL|CC|CFLAGS|CL$|_CL_|LINK|SOURCE|BUILD|OPENSSL' } | Format-Table -AutoSize | Out-String -Width 300
+          Write-Host "== perl on PATH: $((Get-Command perl).Source)"
+          Write-Host "== git config core:"
+          git -C $d config --list --show-origin | Select-String 'core\.'
+          Write-Host "== git status (first 20):"
+          git -C $d status --short | Select-Object -First 20
+          Pop-Location
