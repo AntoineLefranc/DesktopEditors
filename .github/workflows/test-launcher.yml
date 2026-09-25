@@ -1,0 +1,66 @@
+name: Test portable launcher
+
+on:
+  workflow_dispatch:
+    inputs:
+      script_b64:
+        description: "EuroOffice-Portable.ps1 (base64)"
+        required: true
+
+jobs:
+  test:
+    runs-on: windows-2022
+    steps:
+      - name: Prepare portable folder with a fake DesktopEditors.exe
+        shell: pwsh
+        run: |
+          $root = 'C:\EO Portable'
+          New-Item -ItemType Directory -Force "$root\Launcher", "$root\App", "$root\Data" | Out-Null
+          [IO.File]::WriteAllBytes("$root\Launcher\EuroOffice-Portable.ps1", [Convert]::FromBase64String('${{ inputs.script_b64 }}'))
+          # Faux Euro-Office : ping.exe renommé (tourne ~4 s puis se termine)
+          Copy-Item C:\Windows\System32\PING.EXE "$root\App\DesktopEditors.exe"
+          # Réglage "portable" préexistant à réimporter
+          "Windows Registry Editor Version 5.00`r`n`r`n[HKEY_CURRENT_USER\Software\Euro-Office\DesktopEditors]`r`n`"locale`"=`"fr-FR`"`r`n" |
+            Set-Content "$root\Data\registry.reg" -Encoding Unicode
+          # Données d'un Euro-Office "installé" à préserver
+          New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Euro-Office\DesktopEditors" | Out-Null
+          'host' | Set-Content "$env:LOCALAPPDATA\Euro-Office\DesktopEditors\host.txt"
+
+      - name: Parse with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $errs = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile('C:\EO Portable\Launcher\EuroOffice-Portable.ps1', [ref]$null, [ref]$errs)
+          if ($errs) { $errs | ForEach-Object { "{0}: {1}" -f $_.Extent.StartLineNumber, $_.Message }; exit 1 }
+          "Parse OK ($($PSVersionTable.PSVersion))"
+
+      - name: Run without document (double-click case)
+        shell: powershell
+        run: |
+          & 'C:\EO Portable\Launcher\EuroOffice-Portable.ps1' 2>&1
+          "exit: $LASTEXITCODE"
+
+      - name: Run with a document path containing spaces
+        shell: powershell
+        run: |
+          & 'C:\EO Portable\Launcher\EuroOffice-Portable.ps1' '127.0.0.1' 2>&1
+          "exit: $LASTEXITCODE"
+
+      - name: Check result
+        shell: powershell
+        run: |
+          $ok = $true
+          "--- launcher.log"; Get-Content 'C:\EO Portable\Data\launcher.log'
+          "--- host data restored:"
+          $h = "$env:LOCALAPPDATA\Euro-Office\DesktopEditors"
+          $item = Get-Item $h -Force -ErrorAction SilentlyContinue
+          if (-not $item -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not (Test-Path "$h\host.txt")) { "FAIL host data"; $ok = $false } else { "OK" }
+          if (Test-Path "$env:LOCALAPPDATA\Euro-Office\DesktopEditors.portable-backup") { "FAIL backup left"; $ok = $false }
+          "--- registry cleaned:"
+          reg query HKCU\Software\Euro-Office\DesktopEditors *> $null
+          if ($LASTEXITCODE -eq 0) { "FAIL key left"; $ok = $false } else { "OK" }
+          "--- registry.reg kept:"
+          Get-Content 'C:\EO Portable\Data\registry.reg'
+          if (-not (Select-String -Path 'C:\EO Portable\Data\registry.reg' -Pattern 'fr-FR' -Quiet)) { "FAIL registry.reg"; $ok = $false }
+          "--- Data dir:"; Get-ChildItem 'C:\EO Portable\Data' | Format-Table Name
+          if (-not $ok) { exit 1 }
