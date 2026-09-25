@@ -1,0 +1,47 @@
+name: Test desktop shortcut
+
+on:
+  workflow_dispatch:
+    inputs:
+      ps1_b64: { description: "Creer-Raccourci.ps1 (base64)", required: true }
+      bat_b64: { description: "Creer le raccourci .bat (base64)", required: true }
+      ico_b64: { description: "euro-office.ico (base64)", required: true }
+
+jobs:
+  test:
+    runs-on: windows-2022
+    steps:
+      - name: Prepare portable folder
+        shell: powershell
+        run: |
+          $root = 'C:\EO Portable'
+          New-Item -ItemType Directory -Force "$root\Launcher" | Out-Null
+          [IO.File]::WriteAllBytes("$root\Launcher\Creer-Raccourci.ps1", [Convert]::FromBase64String('${{ inputs.ps1_b64 }}'))
+          [IO.File]::WriteAllBytes("$root\Launcher\euro-office.ico",     [Convert]::FromBase64String('${{ inputs.ico_b64 }}'))
+          [IO.File]::WriteAllBytes("$root\Créer le raccourci sur le Bureau.bat", [Convert]::FromBase64String('${{ inputs.bat_b64 }}'))
+          '@echo off' | Set-Content "$root\Lancer Euro-Office.bat" -Encoding ASCII
+          Get-ChildItem $root -Recurse | Select-Object FullName
+
+      - name: Run the shortcut creator (.bat, as a double-click would)
+        shell: cmd
+        run: echo.| cmd /c "C:\EO Portable\Créer le raccourci sur le Bureau.bat"
+
+      - name: Verify the shortcut
+        shell: powershell
+        run: |
+          $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Euro-Office.lnk'
+          if (-not (Test-Path $lnk)) { "FAIL: $lnk absent"; exit 1 }
+          $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+          "Shortcut        : $lnk"
+          "TargetPath      : $($s.TargetPath)"
+          "WorkingDirectory: $($s.WorkingDirectory)"
+          "IconLocation    : $($s.IconLocation)"
+          "WindowStyle     : $($s.WindowStyle)"
+          "Description     : $($s.Description)"
+          $ok = ($s.TargetPath -eq 'C:\EO Portable\Lancer Euro-Office.bat') -and
+                ($s.IconLocation -eq 'C:\EO Portable\Launcher\euro-office.ico,0') -and
+                ($s.WindowStyle -eq 7)
+          Add-Type -AssemblyName System.Drawing
+          $ico = New-Object System.Drawing.Icon('C:\EO Portable\Launcher\euro-office.ico', 256, 256)
+          "Icon loads      : $($ico.Width)x$($ico.Height)"
+          if (-not $ok) { 'FAIL'; exit 1 } else { 'ALL OK' }
