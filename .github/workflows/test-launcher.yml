@@ -49,6 +49,7 @@ jobs:
       - name: Check result
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Continue'
           $ok = $true
           "--- launcher.log"; Get-Content 'C:\EO Portable\Data\launcher.log'
           "--- host data restored:"
