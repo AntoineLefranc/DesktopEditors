@@ -1,0 +1,72 @@
+name: Build portable launcher (Euro-Office.exe)
+
+on:
+  workflow_dispatch:
+  push:
+    paths: [ 'portable/**', '.github/workflows/build-launcher.yml' ]
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile Euro-Office.exe (csc, .NET Framework 4.x)
+        shell: powershell
+        run: |
+          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          New-Item -ItemType Directory -Force out | Out-Null
+          & $csc /nologo /target:winexe /platform:anycpu /optimize+ `
+                 /win32icon:portable\launcher\euro-office.ico `
+                 /reference:System.Windows.Forms.dll `
+                 /out:out\Euro-Office.exe portable\launcher\EuroOfficeLauncher.cs
+          if ($LASTEXITCODE) { exit 1 }
+          & $csc /nologo /target:winexe /out:out\FakeEditors.exe portable\launcher\FakeEditors.cs
+          if ($LASTEXITCODE) { exit 1 }
+          Get-Item out\*.exe | Format-Table Name, Length
+
+      - name: Test - no window while Euro-Office runs
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $root = 'C:\EO Portable'
+          New-Item -ItemType Directory -Force "$root\Launcher", "$root\App", "$root\Data" | Out-Null
+          Copy-Item out\Euro-Office.exe $root
+          Copy-Item portable\EuroOffice-Portable.ps1 "$root\Launcher"
+          Copy-Item out\FakeEditors.exe "$root\App\DesktopEditors.exe"
+
+          $before = @(Get-Process powershell -ErrorAction SilentlyContinue | ForEach-Object Id)
+          Start-Process "$root\Euro-Office.exe"
+          Start-Sleep -Seconds 6
+
+          $ok = $true
+          $fake = Get-Process DesktopEditors -ErrorAction SilentlyContinue
+          if ($fake) { 'OK   DesktopEditors lancé' } else { 'FAIL DesktopEditors non lancé'; $ok = $false }
+
+          $ps = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+                Where-Object { $_.CommandLine -like '*EuroOffice-Portable.ps1*' }
+          if (-not $ps) { 'FAIL processus du lanceur introuvable'; $ok = $false }
+          foreach ($p in $ps) {
+              $h = (Get-Process -Id $p.ProcessId).MainWindowHandle
+              "     lanceur PID $($p.ProcessId) : MainWindowHandle = $h"
+              if ($h -ne [IntPtr]::Zero) { 'FAIL le lanceur a une fenêtre'; $ok = $false } else { 'OK   aucune fenêtre pour le lanceur' }
+          }
+
+          $junction = Get-Item "$env:LOCALAPPDATA\Euro-Office\DesktopEditors" -Force -ErrorAction SilentlyContinue
+          if ($junction -and ($junction.Attributes -band [IO.FileAttributes]::ReparsePoint)) { 'OK   jonction active pendant la session' } else { 'FAIL jonction absente'; $ok = $false }
+
+          # Attendre la fin de la session (15 s d'appli + nettoyage)
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*EuroOffice-Portable.ps1*' }) -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
+
+          if (Test-Path "$env:LOCALAPPDATA\Euro-Office\DesktopEditors") { 'FAIL jonction non supprimée'; $ok = $false } else { 'OK   jonction supprimée à la fermeture' }
+          '--- launcher.log'; Get-Content "$root\Data\launcher.log"
+          if (-not $ok) { exit 1 }
+          'ALL OK'
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: euro-office-portable-launcher
+          path: out/Euro-Office.exe
+          retention-days: 30
