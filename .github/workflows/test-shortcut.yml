@@ -18,13 +18,19 @@ jobs:
           New-Item -ItemType Directory -Force "$root\Launcher" | Out-Null
           [IO.File]::WriteAllBytes("$root\Launcher\Creer-Raccourci.ps1", [Convert]::FromBase64String('${{ inputs.ps1_b64 }}'))
           [IO.File]::WriteAllBytes("$root\Launcher\euro-office.ico",     [Convert]::FromBase64String('${{ inputs.ico_b64 }}'))
-          [IO.File]::WriteAllBytes("$root\Créer le raccourci sur le Bureau.bat", [Convert]::FromBase64String('${{ inputs.bat_b64 }}'))
+          $batName = 'Cr' + [char]0xE9 + 'er le raccourci sur le Bureau.bat'
+          [IO.File]::WriteAllBytes((Join-Path $root $batName), [Convert]::FromBase64String('${{ inputs.bat_b64 }}'))
           '@echo off' | Set-Content "$root\Lancer Euro-Office.bat" -Encoding ASCII
           Get-ChildItem $root -Recurse | Select-Object FullName
 
       - name: Run the shortcut creator (.bat, as a double-click would)
-        shell: cmd
-        run: echo.| cmd /c "C:\EO Portable\Créer le raccourci sur le Bureau.bat"
+        shell: powershell
+        run: |
+          $bat = Get-ChildItem 'C:\EO Portable' -Filter '*raccourci*.bat' | Select-Object -First 1
+          "Running: $($bat.FullName)"
+          '' | & cmd.exe /c "`"$($bat.FullName)`""
+          "exit: $LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Verify the shortcut
         shell: powershell
